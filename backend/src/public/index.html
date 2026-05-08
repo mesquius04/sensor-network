@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="refresh" content="10">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Device Registry</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0d1117;
+      color: #c9d1d9;
+      font-family: 'Courier New', Courier, monospace;
+      padding: 2rem;
+    }
+
+    header {
+      border-bottom: 1px solid #30363d;
+      padding-bottom: 1rem;
+      margin-bottom: 2rem;
+    }
+
+    header h1 {
+      font-size: 1.4rem;
+      color: #58a6ff;
+      letter-spacing: 0.05em;
+    }
+
+    header p {
+      font-size: 0.75rem;
+      color: #8b949e;
+      margin-top: 0.25rem;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+
+    thead th {
+      text-align: left;
+      padding: 0.5rem 1rem;
+      background: #161b22;
+      color: #58a6ff;
+      border-bottom: 1px solid #30363d;
+      text-transform: uppercase;
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+    }
+
+    tbody tr {
+      border-bottom: 1px solid #21262d;
+      transition: background 0.1s;
+    }
+
+    tbody tr:hover { background: #161b22; }
+
+    tbody td {
+      padding: 0.6rem 1rem;
+      color: #c9d1d9;
+    }
+
+    tbody td:first-child {
+      color: #3fb950;
+      font-weight: bold;
+      width: 6rem;
+    }
+
+    .empty {
+      text-align: center;
+      padding: 3rem;
+      color: #8b949e;
+    }
+
+    footer {
+      margin-top: 2rem;
+      font-size: 0.7rem;
+      color: #8b949e;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Device Registry</h1>
+    <p id="meta">Loading&hellip;</p>
+  </header>
+
+  <table id="table">
+    <thead>
+      <tr>
+        <th>Device ID</th>
+        <th>Local IP</th>
+        <th>Registered At</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+
+  <footer>Auto-refreshes every 10 seconds &mdash; <span id="ts"></span></footer>
+
+  <script>
+    document.getElementById('ts').textContent = new Date().toLocaleTimeString();
+
+    fetch('/api/devices')
+      .then(r => r.json())
+      .then(devices => {
+        const tbody = document.getElementById('tbody');
+        document.getElementById('meta').textContent =
+          devices.length + ' device' + (devices.length !== 1 ? 's' : '') + ' registered';
+
+        if (devices.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="3" class="empty">No devices registered yet.</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = devices.map(d => `
+          <tr>
+            <td>#${d.device_id}</td>
+            <td>${d.local_ip}</td>
+            <td>${d.registered_at}</td>
+          </tr>
+        `).join('');
+      })
+      .catch(() => {
+        document.getElementById('meta').textContent = 'Failed to load devices.';
+      });
+  </script>
+</body>
+</html>
