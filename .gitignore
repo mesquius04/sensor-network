@@ -1,0 +1,9 @@
+.claude/
+backend/node_modules/
+backend/central.db
+backend/.env
+backend/backend_linux
+backend/backend
+*.tar.xz
+*.tar.gz
+go*.linux-*.tar.gz
