@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">  
+<head>
+    <meta charset="UTF-8">
+    <title>Smart Home Dashboard</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <link rel="stylesheet" href="css/dashboard.css">
+</head>
+<body>
+    <!-- Botón de cambio de tema -->
+    <button id="theme-toggle" class="theme-toggle" title="Cambiar tema">
+        <i class="fas fa-moon"></i>
+    </button>
+
+    <h1>🏠 (NAME) - Smart Home Dashboard 🏠</h1>
+    <div id="connection-status" class="status">⏳ Connecting to the server... ⏳</div>
+
+    <!-- secció de control de veu -->
+    <section id="voice-panel">
+        <h2>🎙️ Voice Control (AI)</h2>
+        <p id="voice-text">Example: "Set the Living Room to 21 degrees"</p>
+        <button id="btn-talk">Press to Talk</button>
+    </section>
+    
+    <section id="dashboard" class="grid-container"></section>
+
+    <script src="js/dashboard.js"></script>
+</body>
+</html>
