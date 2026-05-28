@@ -227,34 +227,56 @@ func handleReadings(w http.ResponseWriter, r *http.Request) {
 // handleCommand publishes a literal command string to <prefix>/<node>/central.
 // The ESP32 firmware reads the raw payload (e.g. "ENCENDER", "APAGAR").
 func handleCommand(w http.ResponseWriter, r *http.Request) {
+	log.Printf("cmd: POST /api/command from %s", r.RemoteAddr)
+
 	var body struct {
 		Node    string `json:"node"`
 		Command string `json:"command"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		log.Printf("cmd: decode failed: %v", err)
 		writeJSON(w, http.StatusBadRequest, errMsg("invalid JSON"))
 		return
 	}
+	log.Printf("cmd: parsed body node=%q command=%q", body.Node, body.Command)
+
 	if body.Node == "" || strings.ContainsAny(body.Node, "/+#") {
+		log.Printf("cmd: rejected, invalid node %q", body.Node)
 		writeJSON(w, http.StatusBadRequest, errMsg("node must be a single topic segment"))
 		return
 	}
 	if body.Command == "" {
+		log.Printf("cmd: rejected, empty command")
 		writeJSON(w, http.StatusBadRequest, errMsg("command is required"))
 		return
 	}
 	if mqttClient == nil || !mqttClient.IsConnected() {
+		log.Printf("cmd: rejected, mqtt not connected (client=%v connected=%v)", mqttClient != nil, mqttClient != nil && mqttClient.IsConnected())
 		writeJSON(w, http.StatusServiceUnavailable, errMsg("mqtt broker not connected"))
 		return
 	}
+
 	topic := fmt.Sprintf("%s/%s/central", topicPrefix, body.Node)
-	t := mqttClient.Publish(topic, 1, false, body.Command)
-	if !t.WaitTimeout(3*time.Second) || t.Error() != nil {
-		writeJSON(w, http.StatusBadGateway, errMsg("publish failed"))
+	payload := body.Command // raw string bytes, NOT wrapped JSON
+	log.Printf("cmd: publishing topic=%s qos=1 retained=false payload=%q (%d bytes)", topic, payload, len(payload))
+
+	start := time.Now()
+	t := mqttClient.Publish(topic, 1, false, payload)
+	completed := t.WaitTimeout(3 * time.Second)
+	elapsed := time.Since(start)
+
+	if !completed {
+		log.Printf("cmd: publish TIMEOUT after %s (token not done in 3s)", elapsed)
+		writeJSON(w, http.StatusBadGateway, errMsg("publish timeout"))
 		return
 	}
-	log.Printf("mqtt: published command %q to %s", body.Command, topic)
-	writeJSON(w, http.StatusOK, map[string]string{"topic": topic, "command": body.Command})
+	if err := t.Error(); err != nil {
+		log.Printf("cmd: publish ERROR after %s: %v", elapsed, err)
+		writeJSON(w, http.StatusBadGateway, errMsg("publish failed: "+err.Error()))
+		return
+	}
+	log.Printf("cmd: publish OK in %s (topic=%s payload=%q)", elapsed, topic, payload)
+	writeJSON(w, http.StatusOK, map[string]string{"topic": topic, "command": payload})
 }
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -280,6 +302,12 @@ func connectMQTT() mqtt.Client {
 		SetAutoReconnect(true).
 		SetConnectRetry(true).
 		SetConnectRetryInterval(5 * time.Second).
+		// Phone hotspots and CGNATs drop idle TCP after ~60s. Shorter
+		// keepalive keeps the connection warm; longer ping timeout tolerates
+		// slow round-trips over flaky uplinks.
+		SetKeepAlive(15 * time.Second).
+		SetPingTimeout(15 * time.Second).
+		SetWriteTimeout(10 * time.Second).
 		SetOnConnectHandler(onMQTTConnect).
 		SetConnectionLostHandler(func(_ mqtt.Client, err error) {
 			log.Printf("mqtt: connection lost: %v", err)
@@ -326,13 +354,13 @@ func topicNode(topic string) string {
 func handleDataMessage(_ mqtt.Client, msg mqtt.Message) {
 	node := topicNode(msg.Topic())
 	if node == "" {
-		log.Printf("mqtt: empty node on topic %q", msg.Topic())
+		log.Printf("mqtt: empty node on topic %q (payload=%q)", msg.Topic(), msg.Payload())
 		return
 	}
 
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(msg.Payload(), &raw); err != nil {
-		log.Printf("mqtt: bad payload on %s: %v", msg.Topic(), err)
+		log.Printf("mqtt: bad payload on %s: %v (raw=%q)", msg.Topic(), err, msg.Payload())
 		return
 	}
 	metrics := make(map[string]float64, len(raw))
@@ -343,12 +371,14 @@ func handleDataMessage(_ mqtt.Client, msg mqtt.Message) {
 		}
 	}
 	if len(metrics) == 0 {
-		log.Printf("mqtt: no numeric metrics on %s", msg.Topic())
+		log.Printf("mqtt: no numeric metrics on %s (payload=%q)", msg.Topic(), msg.Payload())
 		return
 	}
 	if err := insertReadings(node, metrics); err != nil {
 		log.Printf("mqtt: store readings for %q failed: %v", node, err)
+		return
 	}
+	log.Printf("mqtt: ingested node=%q metrics=%d topic=%s", node, len(metrics), msg.Topic())
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
