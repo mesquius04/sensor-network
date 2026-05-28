@@ -1,16 +1,20 @@
 package main
 
 import (
+	"crypto/rand"
 	"database/sql"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 	_ "modernc.org/sqlite"
 )
 
@@ -20,14 +24,17 @@ import (
 var indexHTML []byte
 
 var (
-	db        *sql.DB
-	startTime = time.Now()
+	db          *sql.DB
+	mqttClient  mqtt.Client
+	topicPrefix string
+	startTime   = time.Now()
 )
 
 func main() {
-	port   := getenv("PORT", "3000")
-	host   := getenv("HOST", "0.0.0.0")
+	port := getenv("PORT", "3000")
+	host := getenv("HOST", "0.0.0.0")
 	dbPath := getenv("DB_PATH", "./central.db")
+	topicPrefix = strings.TrimRight(getenv("MQTT_TOPIC_PREFIX", "house"), "/")
 
 	var err error
 	db, err = sql.Open("sqlite", dbPath)
@@ -36,20 +43,22 @@ func main() {
 	}
 	defer db.Close()
 
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS devices (
-		device_id     INTEGER PRIMARY KEY AUTOINCREMENT,
-		local_ip      TEXT    NOT NULL UNIQUE,
-		registered_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	)`)
-	if err != nil {
-		log.Fatalf("create table: %v", err)
+	if err := initSchema(); err != nil {
+		log.Fatalf("init schema: %v", err)
+	}
+
+	// MQTT ingest + command publish; HTTP serves reads/UI below.
+	mqttClient = connectMQTT()
+	if mqttClient != nil {
+		defer mqttClient.Disconnect(250)
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health",      handleHealth)
-	mux.HandleFunc("POST /register",   handleRegister)
+	mux.HandleFunc("GET /health", handleHealth)
 	mux.HandleFunc("GET /api/devices", handleDevices)
-	mux.HandleFunc("GET /",            handleIndex)
+	mux.HandleFunc("GET /api/readings", handleReadings)
+	mux.HandleFunc("POST /api/command", handleCommand)
+	mux.HandleFunc("GET /", handleIndex)
 
 	addr := fmt.Sprintf("%s:%s", host, port)
 	log.Printf("listening on %s", addr)
@@ -65,7 +74,82 @@ func getenv(key, def string) string {
 	return def
 }
 
-// ── handlers ──────────────────────────────────────────────────────────────────
+// ── schema ──────────────────────────────────────────────────────────────────
+
+func initSchema() error {
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS devices (
+			device_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+			node_name  TEXT    NOT NULL UNIQUE,
+			first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+			last_seen  DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE TABLE IF NOT EXISTS readings (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			device_id   INTEGER NOT NULL REFERENCES devices(device_id),
+			metric      TEXT    NOT NULL,
+			value       REAL    NOT NULL,
+			recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX IF NOT EXISTS idx_readings_device_time
+			ON readings(device_id, recorded_at);
+	`)
+	return err
+}
+
+// ── shared data access (used by both HTTP and MQTT paths) ─────────────────────
+
+type Device struct {
+	DeviceID  int64  `json:"device_id"`
+	NodeName  string `json:"node_name"`
+	FirstSeen string `json:"first_seen"`
+	LastSeen  string `json:"last_seen"`
+}
+
+// upsertDevice inserts the node if new, otherwise refreshes last_seen, and
+// returns the resulting row.
+func upsertDevice(nodeName string) (Device, error) {
+	var d Device
+	if nodeName == "" || strings.ContainsAny(nodeName, "/+#") {
+		return d, fmt.Errorf("node_name must be a single non-empty topic segment")
+	}
+
+	_, err := db.Exec(`
+		INSERT INTO devices (node_name) VALUES (?)
+		ON CONFLICT(node_name) DO UPDATE SET last_seen = CURRENT_TIMESTAMP`,
+		nodeName)
+	if err != nil {
+		return d, err
+	}
+
+	err = db.QueryRow(`
+		SELECT device_id, node_name, first_seen, last_seen
+		FROM devices WHERE node_name = ?`, nodeName).
+		Scan(&d.DeviceID, &d.NodeName, &d.FirstSeen, &d.LastSeen)
+	return d, err
+}
+
+// insertReadings resolves (or creates) the device for nodeName, then stores one
+// row per metric and bumps last_seen.
+func insertReadings(nodeName string, metrics map[string]float64) error {
+	d, err := upsertDevice(nodeName)
+	if err != nil {
+		return err
+	}
+	stmt, err := db.Prepare(`INSERT INTO readings (device_id, metric, value) VALUES (?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for metric, value := range metrics {
+		if _, err := stmt.Exec(d.DeviceID, metric, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ── HTTP handlers ─────────────────────────────────────────────────────────────
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -74,50 +158,10 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-type Device struct {
-	DeviceID     int64  `json:"device_id"`
-	LocalIP      string `json:"local_ip"`
-	RegisteredAt string `json:"registered_at"`
-}
-
-func handleRegister(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		LocalIP string `json:"local_ip"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusBadRequest, errMsg("invalid JSON"))
-		return
-	}
-	ip := net.ParseIP(body.LocalIP)
-	if ip == nil || ip.To4() == nil {
-		writeJSON(w, http.StatusBadRequest, errMsg("local_ip is required and must be a valid IPv4 address"))
-		return
-	}
-
-	res, err := db.Exec(`INSERT OR IGNORE INTO devices (local_ip) VALUES (?)`, body.LocalIP)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errMsg("db error"))
-		return
-	}
-
-	var d Device
-	rowID, _ := res.LastInsertId()
-	var query string
-	var arg any
-	if rowID == 0 {
-		query, arg = `SELECT device_id, local_ip, registered_at FROM devices WHERE local_ip = ?`, body.LocalIP
-	} else {
-		query, arg = `SELECT device_id, local_ip, registered_at FROM devices WHERE device_id = ?`, rowID
-	}
-	if err := db.QueryRow(query, arg).Scan(&d.DeviceID, &d.LocalIP, &d.RegisteredAt); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errMsg("db error"))
-		return
-	}
-	writeJSON(w, http.StatusOK, d)
-}
-
 func handleDevices(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Query(`SELECT device_id, local_ip, registered_at FROM devices ORDER BY device_id ASC`)
+	rows, err := db.Query(`
+		SELECT device_id, node_name, first_seen, last_seen
+		FROM devices ORDER BY device_id ASC`)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errMsg("db error"))
 		return
@@ -127,12 +171,90 @@ func handleDevices(w http.ResponseWriter, r *http.Request) {
 	devices := []Device{}
 	for rows.Next() {
 		var d Device
-		if err := rows.Scan(&d.DeviceID, &d.LocalIP, &d.RegisteredAt); err != nil {
+		if err := rows.Scan(&d.DeviceID, &d.NodeName, &d.FirstSeen, &d.LastSeen); err != nil {
 			continue
 		}
 		devices = append(devices, d)
 	}
 	writeJSON(w, http.StatusOK, devices)
+}
+
+type Reading struct {
+	DeviceID   int64   `json:"device_id"`
+	NodeName   string  `json:"node_name"`
+	Metric     string  `json:"metric"`
+	Value      float64 `json:"value"`
+	RecordedAt string  `json:"recorded_at"`
+}
+
+func handleReadings(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 1000 {
+			limit = n
+		}
+	}
+
+	query := `
+		SELECT r.device_id, d.node_name, r.metric, r.value, r.recorded_at
+		FROM readings r JOIN devices d ON d.device_id = r.device_id`
+	args := []any{}
+	if node := r.URL.Query().Get("node"); node != "" {
+		query += ` WHERE d.node_name = ?`
+		args = append(args, node)
+	}
+	query += ` ORDER BY r.id DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMsg("db error"))
+		return
+	}
+	defer rows.Close()
+
+	readings := []Reading{}
+	for rows.Next() {
+		var rd Reading
+		if err := rows.Scan(&rd.DeviceID, &rd.NodeName, &rd.Metric, &rd.Value, &rd.RecordedAt); err != nil {
+			continue
+		}
+		readings = append(readings, rd)
+	}
+	writeJSON(w, http.StatusOK, readings)
+}
+
+// handleCommand publishes a literal command string to <prefix>/<node>/central.
+// The ESP32 firmware reads the raw payload (e.g. "ENCENDER", "APAGAR").
+func handleCommand(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Node    string `json:"node"`
+		Command string `json:"command"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, errMsg("invalid JSON"))
+		return
+	}
+	if body.Node == "" || strings.ContainsAny(body.Node, "/+#") {
+		writeJSON(w, http.StatusBadRequest, errMsg("node must be a single topic segment"))
+		return
+	}
+	if body.Command == "" {
+		writeJSON(w, http.StatusBadRequest, errMsg("command is required"))
+		return
+	}
+	if mqttClient == nil || !mqttClient.IsConnected() {
+		writeJSON(w, http.StatusServiceUnavailable, errMsg("mqtt broker not connected"))
+		return
+	}
+	topic := fmt.Sprintf("%s/%s/central", topicPrefix, body.Node)
+	t := mqttClient.Publish(topic, 1, false, body.Command)
+	if !t.WaitTimeout(3*time.Second) || t.Error() != nil {
+		writeJSON(w, http.StatusBadGateway, errMsg("publish failed"))
+		return
+	}
+	log.Printf("mqtt: published command %q to %s", body.Command, topic)
+	writeJSON(w, http.StatusOK, map[string]string{"topic": topic, "command": body.Command})
 }
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -142,6 +264,91 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(indexHTML)
+}
+
+// ── MQTT ingest ───────────────────────────────────────────────────────────────
+
+// connectMQTT subscribes to <prefix>/+ (3-segment data topics). It returns nil
+// (and logs) if the broker is unreachable, so the HTTP server still starts.
+func connectMQTT() mqtt.Client {
+	broker := getenv("MQTT_BROKER", "tcp://broker.hivemq.com:1883")
+	clientID := getenv("MQTT_CLIENT_ID", "central-backend-"+randHex(4))
+
+	opts := mqtt.NewClientOptions().
+		AddBroker(broker).
+		SetClientID(clientID).
+		SetAutoReconnect(true).
+		SetConnectRetry(true).
+		SetConnectRetryInterval(5 * time.Second).
+		SetOnConnectHandler(onMQTTConnect).
+		SetConnectionLostHandler(func(_ mqtt.Client, err error) {
+			log.Printf("mqtt: connection lost: %v", err)
+		})
+
+	if user := os.Getenv("MQTT_USERNAME"); user != "" {
+		opts.SetUsername(user).SetPassword(os.Getenv("MQTT_PASSWORD"))
+	}
+
+	client := mqtt.NewClient(opts)
+	// With ConnectRetry the initial Connect won't block on a down broker; it
+	// keeps retrying in the background and (re)subscribes via onMQTTConnect.
+	client.Connect()
+	log.Printf("mqtt: client started, broker=%s clientID=%s prefix=%s", broker, clientID, topicPrefix)
+	return client
+}
+
+// onMQTTConnect (re)establishes the data subscription on every successful
+// connect, so it survives reconnects. Topic shape: <prefix>/<node> (e.g.
+// "house/room"). Command topics live one level deeper
+// (<prefix>/<node>/central) and are explicitly excluded by the single-level
+// wildcard.
+func onMQTTConnect(client mqtt.Client) {
+	dataTopic := topicPrefix + "/+"
+	log.Printf("mqtt: connected, subscribing to %s", dataTopic)
+	if t := client.Subscribe(dataTopic, 1, handleDataMessage); t.Wait() && t.Error() != nil {
+		log.Printf("mqtt: subscribe %s failed: %v", dataTopic, t.Error())
+	}
+}
+
+// topicNode returns the last segment of the topic, which by convention is the
+// node identifier (e.g. "room", "salon", "cocina").
+func topicNode(topic string) string {
+	parts := strings.Split(topic, "/")
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[len(parts)-1]
+}
+
+// handleDataMessage parses the ESP32 JSON payload (numeric fields only) and
+// stores one reading per field. Non-numeric fields are ignored so the firmware
+// can add string fields later without breaking ingest.
+func handleDataMessage(_ mqtt.Client, msg mqtt.Message) {
+	node := topicNode(msg.Topic())
+	if node == "" {
+		log.Printf("mqtt: empty node on topic %q", msg.Topic())
+		return
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(msg.Payload(), &raw); err != nil {
+		log.Printf("mqtt: bad payload on %s: %v", msg.Topic(), err)
+		return
+	}
+	metrics := make(map[string]float64, len(raw))
+	for k, v := range raw {
+		var f float64
+		if err := json.Unmarshal(v, &f); err == nil {
+			metrics[k] = f
+		}
+	}
+	if len(metrics) == 0 {
+		log.Printf("mqtt: no numeric metrics on %s", msg.Topic())
+		return
+	}
+	if err := insertReadings(node, metrics); err != nil {
+		log.Printf("mqtt: store readings for %q failed: %v", node, err)
+	}
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -154,4 +361,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func errMsg(msg string) map[string]string {
 	return map[string]string{"error": msg}
+}
+
+func randHex(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		// Fall back to a timestamp; uniqueness is best-effort, not security.
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(b)
 }

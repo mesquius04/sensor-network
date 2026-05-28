@@ -33,6 +33,13 @@
       margin-top: 0.25rem;
     }
 
+    h2 {
+      font-size: 1rem;
+      color: #58a6ff;
+      letter-spacing: 0.05em;
+      margin: 2.5rem 0 1rem;
+    }
+
     table {
       width: 100%;
       border-collapse: collapse;
@@ -74,6 +81,38 @@
       color: #8b949e;
     }
 
+    .commands {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 0.5rem;
+    }
+
+    .commands select,
+    .commands input,
+    .commands button {
+      background: #161b22;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      padding: 0.4rem 0.8rem;
+      font-family: inherit;
+      font-size: 0.85rem;
+    }
+
+    .commands button {
+      cursor: pointer;
+      color: #58a6ff;
+    }
+
+    .commands button:hover { background: #21262d; }
+
+    #cmd-status {
+      font-size: 0.75rem;
+      color: #8b949e;
+      margin-left: 0.5rem;
+    }
+
     footer {
       margin-top: 2rem;
       font-size: 0.7rem;
@@ -91,11 +130,35 @@
     <thead>
       <tr>
         <th>Device ID</th>
-        <th>Local IP</th>
-        <th>Registered At</th>
+        <th>Node</th>
+        <th>First Seen</th>
+        <th>Last Seen</th>
       </tr>
     </thead>
     <tbody id="tbody"></tbody>
+  </table>
+
+  <h2>Send command</h2>
+  <div class="commands">
+    <select id="cmd-node"><option value="">(select node)</option></select>
+    <input id="cmd-text" type="text" value="ENCENDER" size="14">
+    <button data-cmd="ENCENDER">ENCENDER</button>
+    <button data-cmd="APAGAR">APAGAR</button>
+    <button id="cmd-send">Send</button>
+    <span id="cmd-status"></span>
+  </div>
+
+  <h2 id="readings-title">Latest readings</h2>
+  <table id="readings-table">
+    <thead>
+      <tr>
+        <th>Node</th>
+        <th>Metric</th>
+        <th>Value</th>
+        <th>Recorded At</th>
+      </tr>
+    </thead>
+    <tbody id="readings-tbody"></tbody>
   </table>
 
   <footer>Auto-refreshes every 10 seconds &mdash; <span id="ts"></span></footer>
@@ -108,24 +171,82 @@
       .then(devices => {
         const tbody = document.getElementById('tbody');
         document.getElementById('meta').textContent =
-          devices.length + ' device' + (devices.length !== 1 ? 's' : '') + ' registered';
+          devices.length + ' device' + (devices.length !== 1 ? 's' : '') + ' seen';
+
+        const nodeSel = document.getElementById('cmd-node');
+        devices.forEach(d => {
+          const opt = document.createElement('option');
+          opt.value = d.node_name;
+          opt.textContent = d.node_name;
+          nodeSel.appendChild(opt);
+        });
 
         if (devices.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="3" class="empty">No devices registered yet.</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="4" class="empty">No devices seen yet.</td></tr>';
           return;
         }
 
         tbody.innerHTML = devices.map(d => `
           <tr>
             <td>#${d.device_id}</td>
-            <td>${d.local_ip}</td>
-            <td>${d.registered_at}</td>
+            <td>${d.node_name}</td>
+            <td>${d.first_seen}</td>
+            <td>${d.last_seen}</td>
           </tr>
         `).join('');
       })
       .catch(() => {
         document.getElementById('meta').textContent = 'Failed to load devices.';
       });
+
+    fetch('/api/readings?limit=50')
+      .then(r => r.json())
+      .then(readings => {
+        const tbody = document.getElementById('readings-tbody');
+        if (readings.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="4" class="empty">No readings yet.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = readings.map(r => `
+          <tr>
+            <td>${r.node_name}</td>
+            <td>${r.metric}</td>
+            <td>${r.value}</td>
+            <td>${r.recorded_at}</td>
+          </tr>
+        `).join('');
+      })
+      .catch(() => {
+        document.getElementById('readings-tbody').innerHTML =
+          '<tr><td colspan="4" class="empty">Failed to load readings.</td></tr>';
+      });
+
+    // Command publishing. The quick-action buttons publish their own label;
+    // "Send" publishes whatever is in the text input. We page-refresh after a
+    // successful send so the meta-refresh stays in sync.
+    function sendCommand(command) {
+      const node = document.getElementById('cmd-node').value;
+      const status = document.getElementById('cmd-status');
+      if (!node) { status.textContent = 'pick a node first'; return; }
+      status.textContent = 'sending…';
+      fetch('/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ node, command })
+      })
+        .then(r => r.json().then(j => ({ ok: r.ok, body: j })))
+        .then(({ ok, body }) => {
+          status.textContent = ok ? 'sent: ' + body.command : 'error: ' + (body.error || 'unknown');
+        })
+        .catch(err => { status.textContent = 'error: ' + err.message; });
+    }
+
+    document.querySelectorAll('.commands button[data-cmd]').forEach(btn => {
+      btn.addEventListener('click', () => sendCommand(btn.dataset.cmd));
+    });
+    document.getElementById('cmd-send').addEventListener('click', () => {
+      sendCommand(document.getElementById('cmd-text').value);
+    });
   </script>
 </body>
 </html>
