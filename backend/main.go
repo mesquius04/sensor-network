@@ -56,7 +56,8 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
 	mux.HandleFunc("GET /api/devices", handleDevices)
-	mux.HandleFunc("GET /api/readings", handleReadings)
+	mux.HandleFunc("GET /api/readings", handleLatestReadings)
+	mux.HandleFunc("GET /api/readings/all", handleReadings)
 	mux.HandleFunc("POST /api/command", handleCommand)
 	mux.HandleFunc("GET /", handleIndex)
 
@@ -187,6 +188,46 @@ type Reading struct {
 	RecordedAt string  `json:"recorded_at"`
 }
 
+// handleLatestReadings returns the single most recent reading per (node, metric)
+// pair — one row per metric per node. Useful for dashboards that only need
+// current state without historical data.
+func handleLatestReadings(w http.ResponseWriter, r *http.Request) {
+	query := `
+		SELECT r.device_id, d.node_name, r.metric, r.value, r.recorded_at
+		FROM readings r
+		JOIN devices d ON d.device_id = r.device_id
+		WHERE r.id = (
+			SELECT MAX(r2.id)
+			FROM readings r2
+			WHERE r2.device_id = r.device_id AND r2.metric = r.metric
+		)`
+	args := []any{}
+	if node := r.URL.Query().Get("node"); node != "" {
+		query += ` AND d.node_name = ?`
+		args = append(args, node)
+	}
+	query += ` ORDER BY d.node_name, r.metric`
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMsg("db error"))
+		return
+	}
+	defer rows.Close()
+
+	readings := []Reading{}
+	for rows.Next() {
+		var rd Reading
+		if err := rows.Scan(&rd.DeviceID, &rd.NodeName, &rd.Metric, &rd.Value, &rd.RecordedAt); err != nil {
+			continue
+		}
+		readings = append(readings, rd)
+	}
+	writeJSON(w, http.StatusOK, readings)
+}
+
+// handleReadings returns historical readings (up to limit, default 50, max 1000),
+// optionally filtered by node. Use /api/readings/all for historical data.
 func handleReadings(w http.ResponseWriter, r *http.Request) {
 	limit := 50
 	if v := r.URL.Query().Get("limit"); v != "" {

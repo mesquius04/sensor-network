@@ -199,7 +199,7 @@
         document.getElementById('meta').textContent = 'Failed to load devices.';
       });
 
-    fetch('/api/readings?limit=50')
+    fetch('/api/readings/all?limit=50')
       .then(r => r.json())
       .then(readings => {
         const tbody = document.getElementById('readings-tbody');
