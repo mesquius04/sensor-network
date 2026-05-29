@@ -21,17 +21,8 @@
       margin-bottom: 2rem;
     }
 
-    header h1 {
-      font-size: 1.4rem;
-      color: #58a6ff;
-      letter-spacing: 0.05em;
-    }
-
-    header p {
-      font-size: 0.75rem;
-      color: #8b949e;
-      margin-top: 0.25rem;
-    }
+    header h1 { font-size: 1.4rem; color: #58a6ff; letter-spacing: 0.05em; }
+    header p   { font-size: 0.75rem; color: #8b949e; margin-top: 0.25rem; }
 
     h2 {
       font-size: 1rem;
@@ -40,12 +31,8 @@
       margin: 2.5rem 0 1rem;
     }
 
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.9rem;
-    }
-
+    /* ── tables ── */
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
     thead th {
       text-align: left;
       padding: 0.5rem 1rem;
@@ -56,68 +43,86 @@
       font-size: 0.75rem;
       letter-spacing: 0.08em;
     }
-
-    tbody tr {
-      border-bottom: 1px solid #21262d;
-      transition: background 0.1s;
-    }
-
+    tbody tr { border-bottom: 1px solid #21262d; transition: background 0.1s; }
     tbody tr:hover { background: #161b22; }
+    tbody td { padding: 0.6rem 1rem; color: #c9d1d9; }
+    tbody td:first-child { color: #3fb950; font-weight: bold; width: 6rem; }
+    .empty { text-align: center; padding: 3rem; color: #8b949e; }
 
-    tbody td {
-      padding: 0.6rem 1rem;
-      color: #c9d1d9;
-    }
-
-    tbody td:first-child {
-      color: #3fb950;
-      font-weight: bold;
-      width: 6rem;
-    }
-
-    .empty {
-      text-align: center;
-      padding: 3rem;
-      color: #8b949e;
-    }
-
-    .commands {
+    /* ── node command cards ── */
+    #cmd-cards {
       display: flex;
-      gap: 0.5rem;
-      align-items: center;
       flex-wrap: wrap;
-      margin-bottom: 0.5rem;
+      gap: 1rem;
+      margin-top: 0.5rem;
     }
 
-    .commands select,
-    .commands input,
-    .commands button {
+    .cmd-card {
       background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 1rem;
+      min-width: 200px;
+      flex: 1 1 200px;
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+    }
+
+    .cmd-card-title {
+      color: #58a6ff;
+      font-weight: bold;
+      font-size: 0.9rem;
+      letter-spacing: 0.05em;
+    }
+
+    .cmd-card-btns {
+      display: flex;
+      gap: 0.4rem;
+      flex-wrap: wrap;
+    }
+
+    .cmd-card button {
+      background: #0d1117;
       color: #c9d1d9;
       border: 1px solid #30363d;
-      padding: 0.4rem 0.8rem;
+      padding: 0.35rem 0.75rem;
       font-family: inherit;
-      font-size: 0.85rem;
-    }
-
-    .commands button {
+      font-size: 0.8rem;
       cursor: pointer;
-      color: #58a6ff;
+      border-radius: 4px;
+      transition: background 0.1s, border-color 0.1s;
+    }
+    .cmd-card button:hover { background: #21262d; border-color: #58a6ff; }
+    .cmd-card button.on  { color: #3fb950; border-color: #3fb950; }
+    .cmd-card button.off { color: #f85149; border-color: #f85149; }
+
+    .cmd-card-custom {
+      display: flex;
+      gap: 0.4rem;
     }
 
-    .commands button:hover { background: #21262d; }
+    .cmd-card-custom input {
+      flex: 1;
+      background: #0d1117;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      padding: 0.35rem 0.6rem;
+      font-family: inherit;
+      font-size: 0.8rem;
+      border-radius: 4px;
+      min-width: 0;
+    }
 
-    #cmd-status {
-      font-size: 0.75rem;
+    .cmd-card-status {
+      font-size: 0.72rem;
       color: #8b949e;
-      margin-left: 0.5rem;
+      min-height: 1em;
     }
+    .cmd-card-status.ok  { color: #3fb950; }
+    .cmd-card-status.err { color: #f85149; }
 
-    footer {
-      margin-top: 2rem;
-      font-size: 0.7rem;
-      color: #8b949e;
-    }
+    footer { margin-top: 2rem; font-size: 0.7rem; color: #8b949e; }
   </style>
 </head>
 <body>
@@ -138,15 +143,8 @@
     <tbody id="tbody"></tbody>
   </table>
 
-  <h2>Send command</h2>
-  <div class="commands">
-    <select id="cmd-node"><option value="">(select node)</option></select>
-    <input id="cmd-text" type="text" value="ENCENDER" size="14">
-    <button data-cmd="ENCENDER">ENCENDER</button>
-    <button data-cmd="APAGAR">APAGAR</button>
-    <button id="cmd-send">Send</button>
-    <span id="cmd-status"></span>
-  </div>
+  <h2>Commands</h2>
+  <div id="cmd-cards"><p style="color:#8b949e;font-size:0.85rem">Loading devices…</p></div>
 
   <h2 id="readings-title">Latest readings</h2>
   <table id="readings-table">
@@ -166,69 +164,106 @@
   <script>
     document.getElementById('ts').textContent = new Date().toLocaleTimeString();
 
-    fetch('/api/devices')
-      .then(r => r.json())
-      .then(devices => {
-        const tbody = document.getElementById('tbody');
-        document.getElementById('meta').textContent =
-          devices.length + ' device' + (devices.length !== 1 ? 's' : '') + ' seen';
+    // ── fix #1: safe fetch — never crashes the page on 5xx or non-array responses ──
+    function safeFetch(url) {
+      return fetch(url)
+        .then(r => r.json().then(data => ({ ok: r.ok, data })))
+        .catch(() => ({ ok: false, data: null }));
+    }
 
-        const nodeSel = document.getElementById('cmd-node');
-        devices.forEach(d => {
-          const opt = document.createElement('option');
-          opt.value = d.node_name;
-          opt.textContent = d.node_name;
-          nodeSel.appendChild(opt);
+    // ── devices + command cards ──
+    safeFetch('/api/devices').then(({ ok, data }) => {
+      if (!ok || !Array.isArray(data)) return; // silently keep previous state
+
+      const tbody = document.getElementById('tbody');
+      document.getElementById('meta').textContent =
+        data.length + ' device' + (data.length !== 1 ? 's' : '') + ' seen';
+
+      if (data.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" class="empty">No devices seen yet.</td></tr>';
+        document.getElementById('cmd-cards').innerHTML =
+          '<p style="color:#8b949e;font-size:0.85rem">No devices yet.</p>';
+        return;
+      }
+
+      // devices table
+      tbody.innerHTML = data.map(d => `
+        <tr>
+          <td>#${d.device_id}</td>
+          <td>${d.node_name}</td>
+          <td>${d.first_seen}</td>
+          <td>${d.last_seen}</td>
+        </tr>
+      `).join('');
+
+      // ── fix #2: one card per device ──
+      const cards = document.getElementById('cmd-cards');
+      cards.innerHTML = '';
+      data.forEach(d => {
+        const card = document.createElement('div');
+        card.className = 'cmd-card';
+        card.innerHTML = `
+          <div class="cmd-card-title">${d.node_name}</div>
+          <div class="cmd-card-btns">
+            <button class="on"  data-node="${d.node_name}" data-cmd="ENCENDER">ENCENDER</button>
+            <button class="off" data-node="${d.node_name}" data-cmd="APAGAR">APAGAR</button>
+          </div>
+          <div class="cmd-card-custom">
+            <input type="text" placeholder="custom command" value="">
+            <button data-node="${d.node_name}" data-custom>Send</button>
+          </div>
+          <div class="cmd-card-status"></div>
+        `;
+
+        const status = card.querySelector('.cmd-card-status');
+
+        // preset buttons
+        card.querySelectorAll('button[data-cmd]').forEach(btn => {
+          btn.addEventListener('click', () =>
+            sendCommand(btn.dataset.node, btn.dataset.cmd, status));
         });
 
-        if (devices.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="4" class="empty">No devices seen yet.</td></tr>';
-          return;
-        }
+        // custom send button
+        const customInput = card.querySelector('input');
+        card.querySelector('button[data-custom]').addEventListener('click', () => {
+          const cmd = customInput.value.trim();
+          if (!cmd) { setStatus(status, 'type a command first', false); return; }
+          sendCommand(d.node_name, cmd, status);
+        });
+        // also send on Enter in the input
+        customInput.addEventListener('keydown', e => {
+          if (e.key === 'Enter') {
+            const cmd = customInput.value.trim();
+            if (!cmd) { setStatus(status, 'type a command first', false); return; }
+            sendCommand(d.node_name, cmd, status);
+          }
+        });
 
-        tbody.innerHTML = devices.map(d => `
-          <tr>
-            <td>#${d.device_id}</td>
-            <td>${d.node_name}</td>
-            <td>${d.first_seen}</td>
-            <td>${d.last_seen}</td>
-          </tr>
-        `).join('');
-      })
-      .catch(() => {
-        document.getElementById('meta').textContent = 'Failed to load devices.';
+        cards.appendChild(card);
       });
+    });
 
-    fetch('/api/readings/all?limit=50')
-      .then(r => r.json())
-      .then(readings => {
-        const tbody = document.getElementById('readings-tbody');
-        if (readings.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="4" class="empty">No readings yet.</td></tr>';
-          return;
-        }
-        tbody.innerHTML = readings.map(r => `
-          <tr>
-            <td>${r.node_name}</td>
-            <td>${r.metric}</td>
-            <td>${r.value}</td>
-            <td>${r.recorded_at}</td>
-          </tr>
-        `).join('');
-      })
-      .catch(() => {
-        document.getElementById('readings-tbody').innerHTML =
-          '<tr><td colspan="4" class="empty">Failed to load readings.</td></tr>';
-      });
+    // ── readings ──
+    safeFetch('/api/readings/all?limit=50').then(({ ok, data }) => {
+      if (!ok || !Array.isArray(data)) return; // silently keep previous state on error
+      const tbody = document.getElementById('readings-tbody');
+      if (data.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" class="empty">No readings yet.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = data.map(r => `
+        <tr>
+          <td>${r.node_name}</td>
+          <td>${r.metric}</td>
+          <td>${r.value}</td>
+          <td>${r.recorded_at}</td>
+        </tr>
+      `).join('');
+    });
 
-    // Command publishing. The quick-action buttons publish their own label;
-    // "Send" publishes whatever is in the text input. We page-refresh after a
-    // successful send so the meta-refresh stays in sync.
-    function sendCommand(command) {
-      const node = document.getElementById('cmd-node').value;
-      const status = document.getElementById('cmd-status');
-      if (!node) { status.textContent = 'pick a node first'; return; }
-      status.textContent = 'sending…';
+    // ── shared command sender ──
+    function sendCommand(node, command, statusEl) {
+      setStatus(statusEl, 'sending…', null);
       fetch('/api/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -236,17 +271,17 @@
       })
         .then(r => r.json().then(j => ({ ok: r.ok, body: j })))
         .then(({ ok, body }) => {
-          status.textContent = ok ? 'sent: ' + body.command : 'error: ' + (body.error || 'unknown');
+          setStatus(statusEl,
+            ok ? '✓ ' + body.command : '✗ ' + (body.error || 'unknown'),
+            ok);
         })
-        .catch(err => { status.textContent = 'error: ' + err.message; });
+        .catch(err => setStatus(statusEl, '✗ ' + err.message, false));
     }
 
-    document.querySelectorAll('.commands button[data-cmd]').forEach(btn => {
-      btn.addEventListener('click', () => sendCommand(btn.dataset.cmd));
-    });
-    document.getElementById('cmd-send').addEventListener('click', () => {
-      sendCommand(document.getElementById('cmd-text').value);
-    });
+    function setStatus(el, text, ok) {
+      el.textContent = text;
+      el.className = 'cmd-card-status' + (ok === true ? ' ok' : ok === false ? ' err' : '');
+    }
   </script>
 </body>
 </html>
